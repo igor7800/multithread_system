@@ -3,9 +3,12 @@
 #include <semaphore.h>
 #include <unistd.h>
 #include <math.h>
+#include "mypcm.h"
 
-#define BUF_SIZE 4410
+#define BUF_SIZE 128
 #define NUM_OF_FILTERS 13
+#define CHANNELS 2
+#define RATE 44100
 
 
 //-----Shared variables-----
@@ -13,6 +16,12 @@ sem_t SHARED_VARS;
 float coefficients[NUM_OF_FILTERS];
 float mic_input[BUF_SIZE];
 float ref_input[BUF_SIZE];
+
+
+snd_pcm_t *capture_handle;
+snd_pcm_t *playback_handle;
+snd_pcm_hw_params_t *capture_params;
+snd_pcm_hw_params_t *playback_params;  
 
 
 
@@ -81,6 +90,7 @@ float calculate_RMS (float *buf)
  * @param *input_buf input to the filter
  * @param *output_buf output from the filter
  */
+//fixme: Need a gain factor from shared variables
 void lp_filter (float *input_buf,float *output_buf) {
     int i;
     float a = 0.8825;
@@ -104,25 +114,25 @@ void player_filter (void * input)
     int i;
     float output_buf[BUF_SIZE];
     float coeff[NUM_OF_FILTERS];
-    for (; ;)
-    { 
-	sem_wait (&SHARED_VARS);
-       	read_ref_input("sin_1000Hz.txt");
-	sem_post (&SHARED_VARS);
+
+    sem_wait (&SHARED_VARS);
+    read_ref_input("sin_1000Hz.txt");
+    sem_post (&SHARED_VARS);
 	
-	sem_wait (&SHARED_VARS);
-	for (i = 0; i <NUM_OF_FILTERS; ++i)
-	    coeff[i] = coefficients[i];	
-	sem_post (&SHARED_VARS);
+    sem_wait (&SHARED_VARS);
+    for (i = 0; i <NUM_OF_FILTERS; ++i)
+	coeff[i] = coefficients[i];	
+    sem_post (&SHARED_VARS);
 	
-	sem_wait (&SHARED_VARS);
-	lp_filter(ref_input,output_buf);
-	sem_post (&SHARED_VARS);
+    sem_wait (&SHARED_VARS);
+    lp_filter(ref_input,output_buf);
+    sem_post (&SHARED_VARS);
 	
-        //sem_wait (&SHARED_VARS);
-        //playback(output_buf)
-	//sem_post (&SHARED_VARS);	
-    }
+    sem_wait (&SHARED_VARS);
+    //fixme: must be a real  output_buffer from filter
+    play(playback_handle,mic_input,BUF_SIZE); 
+    sem_post (&SHARED_VARS);	
+
 }
  
 
@@ -136,54 +146,77 @@ void controller (void * input)
 {
     float ref_rms;
     float mic_rms;
-    float ref_buffer[BUF_SIZE];
+    float filtered_mic_input[BUF_SIZE];
+    float filtered_ref_input[BUF_SIZE];
 
-   for (; ;)
-   { 
-       sem_wait (&SHARED_VARS); 	
-       read_mic_input("sin_1000Hz.txt");
-       sem_post (&SHARED_VARS);
+    sem_wait (&SHARED_VARS); 	
+    record(capture_handle,mic_input,BUF_SIZE);
+    sem_post (&SHARED_VARS);
 	
-       sem_wait (&SHARED_VARS);
-       lp_filter(ref_input,ref_buffer);
-       sem_post (&SHARED_VARS);	
+    sem_wait (&SHARED_VARS);
+    lp_filter(mic_input,filtered_mic_input);
+    sem_post (&SHARED_VARS);	
+              
+    sem_wait (&SHARED_VARS);
+    lp_filter(ref_input,filtered_ref_input);
+    sem_post (&SHARED_VARS);	
        
-       sem_wait (&SHARED_VARS);
-       ref_rms = calculate_RMS (ref_input);
-       printf ("%f\n",ref_rms);		
-       sem_post (&SHARED_VARS); 
+    sem_wait (&SHARED_VARS);
+    ref_rms = calculate_RMS (filtered_ref_input);
+    sem_post (&SHARED_VARS); 
        
-       sem_wait (&SHARED_VARS);
-       mic_rms = calculate_RMS (mic_input);
-       printf ("%f\n",mic_rms);		
-       sem_post (&SHARED_VARS);
+    sem_wait (&SHARED_VARS);
+    mic_rms = calculate_RMS (filtered_mic_input);
+    sem_post (&SHARED_VARS);
        
-       sem_wait (&SHARED_VARS);
-       coefficients[1]=ref_rms-mic_rms;
-       printf ("%f\n",coefficients[1]);
-       sem_post (&SHARED_VARS);
-   }
+    sem_wait (&SHARED_VARS);
+    coefficients[1]=1/(ref_rms-mic_rms);
+    sem_post (&SHARED_VARS);
+       
 }
 
 
 
 int main (int argc, char *argv[]) 
 {
-    int id_number[2];
-    pthread_t t_id[2];
+  int id_number[2];
+  pthread_t t_id[2];
+  id_number[0] = 1;
+  id_number[1] = 2;
+  //---------------------------------------------------
+  //-------ALSA setup----------------------------------
+  //---------------------------------------------------
+  open_pcm(&capture_handle,PCM_DEVICE,SND_PCM_STREAM_CAPTURE,0); 
+  open_pcm(&playback_handle,PCM_DEVICE,SND_PCM_STREAM_PLAYBACK,0);
+  //-----------------------------------------------------
+  snd_pcm_hw_params_malloc (&playback_params);
+  snd_pcm_hw_params_malloc (&capture_params);
+  //----------------------------------------------------
+  snd_pcm_hw_params_any (playback_handle, playback_params);
+  snd_pcm_hw_params_any (capture_handle, capture_params);
+  //----------------------------------------------------
+  set_params(playback_handle,playback_params,CHANNELS,RATE);
+  set_params(capture_handle,capture_params,CHANNELS,RATE);
+  //----------------------------------------------------
+  write_params(playback_handle,playback_params);    
+  write_params(capture_handle,capture_params);
+  //----------------------------------------------------
+  prepair_interface(capture_handle);
+  prepair_interface(playback_handle);
+  //----------------------------------------------------
+  snd_pcm_hw_params_free (playback_params);
+  snd_pcm_hw_params_free (capture_params);
     
-    id_number[0] = 1;
-    id_number[1] = 2;
-
-    for (; ;)
-    {
-	sem_init(&SHARED_VARS, 0, 1);
-	pthread_create(&t_id[0], NULL, (void *) &player_filter, (void *) &id_number[0]);
-	pthread_create(&t_id[1], NULL, (void *) &controller   , (void *) &id_number[1]);
-            
-	pthread_join(t_id[0], NULL);
-	pthread_join(t_id[1], NULL);
-    }
+  //----------THREADS----------------------------------
+  for (; ;)
+  {
+    sem_init(&SHARED_VARS, 0, 1);
+    pthread_create(&t_id[0], NULL, (void *) &player_filter, (void *) &id_number[0]);
+    pthread_create(&t_id[1], NULL, (void *) &controller   , (void *) &id_number[1]);
+	
+    pthread_join(t_id[0], NULL);
+    pthread_join(t_id[1], NULL);
+  }
     return 0;
 } 
 
